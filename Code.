@@ -1,0 +1,239 @@
+public class UpdateSalesforceProducts 
+{  
+    public static void updateSalesforceProductsBasedOnApiResponse() 
+    {
+        HttpRequest request = new HttpRequest();
+        request.setMethod('GET');
+        request.setEndpoint('https://producer-dev-ed.develop.my.salesforce-sites.com/services/apexrest/ProductUpdates');
+        
+        try {
+            HttpResponse response = new Http().send(request);
+            if (response.getStatusCode() == 200) {
+                System.debug('HTTP request is successful');
+                List<ProductWrapper> listProductWrappers = 
+                    (List<ProductWrapper>) JSON.deserialize(response.getBody(), List<ProductWrapper>.class);
+                if (!listProductWrappers.isEmpty())
+                {
+                    System.debug(listProductWrappers);
+                    upsertProductAndInsertPricebookEntries(listProductWrappers);
+                }
+            } else {
+                System.debug('Error: HTTP request failed with status code ' + response.getStatusCode() +
+                             ' and message: ' + response.getStatus()); 
+            }
+        } catch (Exception e) { 
+            System.debug('Error: API call failed. Exception: ' + e.getMessage());
+        }
+    }
+    
+    private static void upsertProductAndInsertPricebookEntries(List<ProductWrapper> listProductWrappers) 
+    { 
+        //Store all product code which are included in wrapper list
+        Set<String> setProductCodesOfIncomingWrapper = new Set<String>();
+        
+        Set<String> setRegionsAgainstWrapper = new Set<String>();
+        //Querry all existing products from salesforce based on product codes of wrapper list 
+        List<Product2> listQuerriedOfProductsByWrapperProductCodes = new List<Product2>();
+        //Add all newly inserted products in this map
+        Map<String, Product2> mapProductByProductCodeToBeInserted = new Map<String, Product2>();
+        //Add all newly updated products in this map
+        Map<Id, Product2> mapProductByProductCodeToBeUpdated = new Map<Id, Product2>();
+        //Store Product Ids of all upsert products based on wrapper list 
+        Set<Id> setProductIdsOfAllUpsertProductsBasedOnWrapper = new Set<Id>();
+        //Store product code as key and product as value of all upsert products based on wrapper list  
+        Map<String, Product2> mapProductByProductCode = new Map<String, Product2>();
+        //Store Pricebooks and their Ids
+        Map<String, Id> mapIdByPriceBook = new Map<String, Id>();
+        //Store all Pricebook entries against all upsert product
+        List<PricebookEntry> listOfExistingPricebookEntriesAgainstUpsertProductsBasedOnWrapper = new List<PricebookEntry>();
+        //Store existing PricebookEntry against product Id and Price book Id
+        Map<String, PricebookEntry> mapExistingPricebookEntryByProductIdAndPricebookId = new Map<String, PricebookEntry>();
+        
+        List<PricebookEntry> listAllPricebookEntriesToBeInserted = new List<PricebookEntry>();
+        List<PricebookEntry> listAllPricebookEntriesToBeUpdated = new List<PricebookEntry>();
+        
+        for (ProductWrapper wrapper : listProductWrappers) 
+        {
+            setProductCodesOfIncomingWrapper.add(wrapper.Product_Code);
+            setRegionsAgainstWrapper.add(wrapper.Region);
+        }
+        system.debug(setProductCodesOfIncomingWrapper);
+        if(!setProductCodesOfIncomingWrapper.isEmpty())
+        {
+            listQuerriedOfProductsByWrapperProductCodes = [SELECT Id, Name, ProductCode FROM Product2
+                                                           WHERE ProductCode IN :setProductCodesOfIncomingWrapper];
+        }
+        
+        if(!listQuerriedOfProductsByWrapperProductCodes.isEmpty())
+        {
+            for (Product2 pd : listQuerriedOfProductsByWrapperProductCodes) 
+            {
+                mapProductByProductCode.put(pd.ProductCode, pd);
+            }
+        }
+        
+        
+        for (ProductWrapper wrapper : listProductWrappers) 
+        { 
+            Product2 existingProduct = mapProductByProductCode.get(wrapper.Product_Code);
+            if (existingProduct != null) 
+            {
+                existingProduct.Name = wrapper.Name;
+                existingProduct.ProductCode = wrapper.Product_Code;
+                existingProduct.Description = wrapper.Description; 
+                existingProduct.IsActive = True;
+                mapProductByProductCodeToBeUpdated.put(existingProduct.Id, existingProduct);
+            } else 
+            {
+                Product2 pd = new Product2();
+                pd.Name = wrapper.Name;
+                pd.ProductCode = wrapper.Product_Code;
+                pd.IsActive = True;
+                pd.Description = wrapper.Description; 
+                mapProductByProductCodeToBeInserted.put(pd.ProductCode, pd);
+            }
+        }
+        
+        System.debug(mapProductByProductCode);
+        System.debug(mapProductByProductCodeToBeInserted);
+        
+        
+        if(!mapProductByProductCodeToBeInserted.isEmpty())
+        {
+            Database.insert(mapProductByProductCodeToBeInserted.values());
+            for (Product2 product : mapProductByProductCodeToBeInserted.values()) 
+            {
+                setProductIdsOfAllUpsertProductsBasedOnWrapper.add(product.Id);
+                mapProductByProductCode.put(product.ProductCode, product);
+            }
+            
+        }
+        
+        if(!mapProductByProductCodeToBeUpdated.isEmpty())
+        {
+            Database.update(mapProductByProductCodeToBeUpdated.values());
+            for (Product2 product : mapProductByProductCodeToBeUpdated.values()) 
+            {
+                setProductIdsOfAllUpsertProductsBasedOnWrapper.add(product.Id);
+            } 
+        }
+        
+        
+        if(!setProductIdsOfAllUpsertProductsBasedOnWrapper.isEmpty())
+        {
+            listOfExistingPricebookEntriesAgainstUpsertProductsBasedOnWrapper = [SELECT Id, Name, Pricebook2Id, Product2Id
+                                                                                 FROM PricebookEntry 
+                                                                                 WHERE 
+                                 Product2Id IN :setProductIdsOfAllUpsertProductsBasedOnWrapper];                                                          
+        }
+        
+        
+        if(!listOfExistingPricebookEntriesAgainstUpsertProductsBasedOnWrapper.isEmpty())
+        {
+            for (PricebookEntry pbEntry : listOfExistingPricebookEntriesAgainstUpsertProductsBasedOnWrapper) 
+            {
+                mapExistingPricebookEntryByProductIdAndPricebookId.put(pbEntry.Product2Id + ' ' + pbEntry.Pricebook2Id, pbEntry);
+            }
+        }
+        
+        
+        List<Pricebook2> listRegionalPriceBooks = [SELECT Id, Name FROM Pricebook2 
+                                                   WHERE Name IN :setRegionsAgainstWrapper OR IsStandard = true];
+        
+        
+        for (Pricebook2 pb : listRegionalPriceBooks) 
+        {
+            mapIdByPriceBook.put(pb.Name, pb.Id);
+        }
+        
+        
+        for (ProductWrapper wrapper : listProductWrappers) 
+        { 
+            Product2 product;
+            Id pricebook2Id;
+            
+            if(mapProductByProductCode.get(wrapper.Product_Code) != null)
+            {
+                product = mapProductByProductCode.get(wrapper.Product_Code);
+            }
+            
+            system.debug(product);
+            
+            if(mapIdByPriceBook.get(wrapper.Region) != null)
+            {
+                pricebook2Id = mapIdByPriceBook.get(wrapper.Region);
+            }
+            
+            if(product != null)
+            {
+                if (mapExistingPricebookEntryByProductIdAndPricebookId.containsKey(product.Id + ' ' + pricebook2Id)) 
+                {
+                    if(wrapper.Pricing >= 0)
+                    {
+                        PricebookEntry pbEntry = mapExistingPricebookEntryByProductIdAndPricebookId.get(product.Id + ' ' +
+                                                                                                        pricebook2Id);
+                        system.debug(pbEntry);
+                        pbEntry.IsActive = true;
+                        pbEntry.UnitPrice = wrapper.Pricing;  
+                        listAllPricebookEntriesToBeUpdated.add(pbEntry); 
+                    }
+                    
+                } else 
+                {
+                    if(mapExistingPricebookEntryByProductIdAndPricebookId.get(product.Id + ' ' +  
+                                                                 mapIdByPriceBook.get('Standard Price Book')) == null)
+                    {
+                        PricebookEntry pbEntryForStandardPricebook = new PricebookEntry(
+                            Product2Id = product.Id,
+                            IsActive = true,
+                            Pricebook2Id = mapIdByPriceBook.get('Standard Price Book'),
+                            UnitPrice = 0
+                        );
+                        system.debug(product.Id);
+                        
+                        listAllPricebookEntriesToBeInserted.add(pbEntryForStandardPricebook);
+                        mapExistingPricebookEntryByProductIdAndPricebookId.put(product.Id + ' ' +  
+                                        mapIdByPriceBook.get('Standard Price Book'), pbEntryForStandardPricebook);
+                    }
+                    
+                    if(pricebook2Id != null)
+                    {
+                        if(wrapper.Pricing >= 0)
+                        {
+                            PricebookEntry pbEntryForCustomPricebooks = new PricebookEntry(
+                                Product2Id = product.Id,
+                                IsActive = true,
+                                Pricebook2Id = pricebook2Id,
+                                UnitPrice = wrapper.Pricing
+                            );
+                            system.debug(product.Id);
+                            listAllPricebookEntriesToBeInserted.add(pbEntryForCustomPricebooks); 
+                        }
+                        
+                    }
+                    
+                }
+            }
+            
+        }
+        
+        if(!listAllPricebookEntriesToBeInserted.isEmpty())
+        {
+            Database.insert(listAllPricebookEntriesToBeInserted);
+        }  
+        
+        if(!listAllPricebookEntriesToBeUpdated.isEmpty())
+        {
+            Database.update(listAllPricebookEntriesToBeUpdated);
+        } 
+        
+    }
+    
+    public class ProductWrapper {  
+        public String Name { get; set; }
+        public String Product_Code { get; set; }
+        public Decimal Pricing { get; set; }
+        public String Region { get; set; }
+        public String Description { get; set; } 
+    }
+}
